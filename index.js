@@ -2,81 +2,68 @@ const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 puppeteer.use(StealthPlugin());
 
-async function scrapeLeads(searchQuery) {
-    console.log(`Starting scraper for: ${searchQuery}`);
+async function main() {
+    console.log("Starting Local Scraper...");
+    console.log("Launching a real Chrome browser on your PC to bypass Cloudflare/Bot protection...");
     
-    // Launch browser (will use the PC's local Chrome)
     const browser = await puppeteer.launch({ 
-        headless: false, // Set to false so you can see it working and bypass captchas if needed
-        defaultViewport: null
+        headless: false, // Opens an actual window on your PC
+        defaultViewport: null,
+        args: ['--start-maximized']
     });
-    
+
     const page = await browser.newPage();
     
-    // Go to B144, Easy.co.il, or Google Maps
-    // For this example, we'll do a generic Google Maps search
-    console.log("Navigating to Google Maps...");
-    await page.goto(`https://www.google.com/maps/search/${encodeURIComponent(searchQuery)}`, {
-        waitUntil: 'networkidle2'
-    });
+    // --- B144 EXAMPLE ---
+    console.log("Navigating to B144...");
+    await page.goto('https://www.b144.co.il/', { waitUntil: 'domcontentloaded' });
     
-    console.log("Waiting for results to load...");
-    await page.waitForTimeout(5000); // Wait for the local pack to render
-    
-    // Scroll the results panel to load more
+    console.log("======================================================");
+    console.log("ACTION REQUIRED: Search for a niche and city in the browser!");
+    console.log("Waiting 20 seconds for you to navigate to the results page...");
+    console.log("======================================================");
+    await new Promise(r => setTimeout(r, 20000));
+
+    console.log("Auto-clicking all 'Reveal Phone' (הצגת מספר) buttons...");
     await page.evaluate(async () => {
-        const wrapper = document.querySelector('div[role="feed"]');
-        if (wrapper) {
-            wrapper.scrollBy(0, 1000);
-            await new Promise(resolve => setTimeout(resolve, 2000));
+        window.scrollBy(0, 1000); // Scroll down to load lazy elements
+        const buttons = Array.from(document.querySelectorAll('button'));
+        for (const btn of buttons) {
+            if (btn.innerText && btn.innerText.includes('הצגת מספר')) {
+                btn.click();
+                await new Promise(r => setTimeout(r, 800)); // wait for API to fetch real number
+            }
         }
     });
 
+    console.log("Waiting 3 seconds for the real numbers to load in the DOM...");
+    await new Promise(r => setTimeout(r, 3000));
+
+    // Extract real 05 mobile numbers
     const leads = await page.evaluate(() => {
         const results = [];
-        // Google Maps business cards usually have role="article" or are nested in the feed
-        const cards = Array.from(document.querySelectorAll('div[role="feed"] > div > div'));
+        const mobileRegex = /05\d[-]*\d{7}/g;
         
-        cards.forEach(card => {
-            const text = card.innerText || "";
-            if (text.includes("05")) {
-                const lines = text.split('\n').map(l => l.trim()).filter(l => l);
-                // Name is usually the first line
-                const name = lines[0];
-                // Find phone
-                const phoneMatch = text.match(/05\d[-]*\d{7}/);
-                // Check if website exists
-                const hasWebsite = text.includes("אתר") || text.toLowerCase().includes("website");
-                
-                if (phoneMatch && !hasWebsite) {
-                    results.push({
-                        name: name,
-                        phone: phoneMatch[0],
-                        rawText: lines.slice(0, 4).join(" | ")
-                    });
-                }
-            }
+        // Method 1: Check Tel links (often updated after clicking reveal)
+        document.querySelectorAll('a[href^="tel:"]').forEach(a => {
+            if (a.href.match(mobileRegex)) results.push(a.href.replace('tel:', ''));
         });
-        
+
+        // Method 2: Fallback text extraction across the whole page
+        const textMatches = document.body.innerText.match(mobileRegex) || [];
+        textMatches.forEach(m => results.push(m.replace('-', '')));
+
         // Deduplicate
-        const uniqueLeads = [];
-        const seen = new Set();
-        for (const lead of results) {
-            if (!seen.has(lead.phone)) {
-                seen.add(lead.phone);
-                uniqueLeads.push(lead);
-            }
-        }
-        return uniqueLeads;
+        return [...new Set(results)];
     });
 
-    console.log("=== SCRAPE COMPLETE ===");
-    console.log(`Found ${leads.length} leads without websites:`);
-    console.table(leads);
+    console.log("\n=== REAL MOBILE NUMBERS EXTRACTED ===");
+    console.log(leads);
+    console.log("=====================================\n");
+    console.log("Script finished. You can now close the browser.");
     
-    await browser.close();
-    return leads;
+    // Optionally: Here is where we will add the Notion API code later 
+    // to push these numbers straight into your Notion CRM!
 }
 
-// Run the script
-scrapeLeads("קבלן שיפוצים באר שבע");
+main().catch(console.error);
