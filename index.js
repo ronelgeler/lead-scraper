@@ -1,69 +1,151 @@
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const fs = require('fs');
+
 puppeteer.use(StealthPlugin());
 
 async function main() {
-    console.log("Starting Local Scraper...");
-    console.log("Launching a real Chrome browser on your PC to bypass Cloudflare/Bot protection...");
-    
+    const args = process.argv.slice(2);
+    const startUrl = args[0] || 'https://www.b144.co.il/';
+    const maxPages = parseInt(args[1]) || 5; // Default scrape 5 pages
+
+    console.log(`Starting Local Auto-Scraper`);
+    console.log(`Target URL: ${startUrl}`);
+    console.log(`Max pages to scrape: ${maxPages}`);
+    console.log("Launching browser to bypass Cloudflare...");
+
     const browser = await puppeteer.launch({ 
-        headless: false, // Opens an actual window on your PC
+        headless: false, // Must be false to bypass bot protection visually
         defaultViewport: null,
         args: ['--start-maximized']
     });
 
     const page = await browser.newPage();
+    let allLeads = [];
+
+    await page.goto(startUrl, { waitUntil: 'domcontentloaded' });
     
-    // --- B144 EXAMPLE ---
-    console.log("Navigating to B144...");
-    await page.goto('https://www.b144.co.il/', { waitUntil: 'domcontentloaded' });
-    
-    console.log("======================================================");
-    console.log("ACTION REQUIRED: Search for a niche and city in the browser!");
-    console.log("Waiting 20 seconds for you to navigate to the results page...");
-    console.log("======================================================");
-    await new Promise(r => setTimeout(r, 20000));
+    // If user started at home page, wait for them to search
+    if (startUrl === 'https://www.b144.co.il/') {
+        console.log("======================================================");
+        console.log("ACTION REQUIRED: Search for a niche and city in the browser!");
+        console.log("Waiting 20 seconds for you to navigate to the results page...");
+        console.log("======================================================");
+        await new Promise(r => setTimeout(r, 20000));
+    }
 
-    console.log("Auto-clicking all 'Reveal Phone' (הצגת מספר) buttons...");
-    await page.evaluate(async () => {
-        window.scrollBy(0, 1000); // Scroll down to load lazy elements
-        const buttons = Array.from(document.querySelectorAll('button'));
-        for (const btn of buttons) {
-            if (btn.innerText && btn.innerText.includes('הצגת מספר')) {
-                btn.click();
-                await new Promise(r => setTimeout(r, 800)); // wait for API to fetch real number
-            }
-        }
-    });
-
-    console.log("Waiting 3 seconds for the real numbers to load in the DOM...");
-    await new Promise(r => setTimeout(r, 3000));
-
-    // Extract real 05 mobile numbers
-    const leads = await page.evaluate(() => {
-        const results = [];
-        const mobileRegex = /05\d[-]*\d{7}/g;
+    for (let currentPage = 1; currentPage <= maxPages; currentPage++) {
+        console.log(`\n--- Scraping Page ${currentPage} ---`);
         
-        // Method 1: Check Tel links (often updated after clicking reveal)
-        document.querySelectorAll('a[href^="tel:"]').forEach(a => {
-            if (a.href.match(mobileRegex)) results.push(a.href.replace('tel:', ''));
+        // 1. Scroll to load lazy elements
+        console.log("Scrolling page to load all businesses...");
+        for(let i=0; i<5; i++) {
+            await page.evaluate(() => window.scrollBy(0, 800));
+            await new Promise(r => setTimeout(r, 500));
+        }
+
+        // 2. Click all Reveal buttons
+        console.log("Auto-clicking 'Reveal Phone' buttons...");
+        await page.evaluate(async () => {
+            const buttons = Array.from(document.querySelectorAll('button'));
+            for (const btn of buttons) {
+                if (btn.innerText && (btn.innerText.includes('הצגת מספר') || btn.innerText.includes('טלפון'))) {
+                    btn.click();
+                    await new Promise(r => setTimeout(r, 600)); // wait for network
+                }
+            }
         });
 
-        // Method 2: Fallback text extraction across the whole page
-        const textMatches = document.body.innerText.match(mobileRegex) || [];
-        textMatches.forEach(m => results.push(m.replace('-', '')));
+        console.log("Waiting 3 seconds for numbers to render...");
+        await new Promise(r => setTimeout(r, 3000));
 
-        // Deduplicate
-        return [...new Set(results)];
-    });
+        // 3. Extract numbers
+        const pageLeads = await page.evaluate(() => {
+            const results = [];
+            const mobileRegex = /05\d[-]*\d{7}/g;
+            
+            // Try to extract from tel links
+            document.querySelectorAll('a[href^="tel:"]').forEach(a => {
+                const match = a.href.match(mobileRegex);
+                if (match) {
+                    // Try to find the closest business name
+                    let name = "Unknown";
+                    let card = a.closest('a, div.bg-white'); // standard card classes
+                    if(card) {
+                        const heading = card.querySelector('h2, h3');
+                        if (heading) name = heading.innerText.trim();
+                    }
+                    results.push({ name, phone: match[0].replace('-', '') });
+                }
+            });
 
-    console.log("\n=== REAL MOBILE NUMBERS EXTRACTED ===");
-    console.log(leads);
-    console.log("=====================================\n");
-    console.log("Script finished. You can now close the browser.");
+            // Fallback for raw text
+            const textMatches = document.body.innerText.match(mobileRegex) || [];
+            textMatches.forEach(m => {
+                results.push({ name: "Extracted from text", phone: m.replace('-', '') });
+            });
+
+            return results;
+        });
+
+        // Deduplicate within the page
+        const uniquePageLeads = [];
+        const seen = new Set();
+        for (const lead of pageLeads) {
+            if (!seen.has(lead.phone)) {
+                seen.add(lead.phone);
+                uniquePageLeads.push(lead);
+            }
+        }
+
+        console.log(`Extracted ${uniquePageLeads.length} unique leads from this page.`);
+        allLeads = allLeads.concat(uniquePageLeads);
+
+        // 4. Try to go to next page
+        const hasNext = await page.evaluate(async () => {
+            // Looking for Next button (usually an arrow icon or 'הבא')
+            const links = Array.from(document.querySelectorAll('a'));
+            const nextBtn = links.find(el => el.innerText.includes('הבא') || el.getAttribute('aria-label') === 'הבא' || el.getAttribute('aria-label') === 'Next');
+            
+            if (nextBtn) {
+                nextBtn.click();
+                return true;
+            }
+            return false;
+        });
+
+        if (hasNext && currentPage < maxPages) {
+            console.log("Moving to Next Page...");
+            await new Promise(r => setTimeout(r, 4000)); // wait for load
+        } else {
+            console.log("No more pages found or max pages reached.");
+            break;
+        }
+    }
+
+    // Deduplicate global
+    const finalLeads = [];
+    const finalSeen = new Set();
+    for (const lead of allLeads) {
+        if (!finalSeen.has(lead.phone)) {
+            finalSeen.add(lead.phone);
+            finalLeads.push(lead);
+        }
+    }
+
+    console.log(`\n=== SCRAPE COMPLETE ===`);
+    console.log(`Total Unique Mobile Leads: ${finalLeads.length}`);
     
-    // Optionally: Here is where we will add the Notion API code later 
-    // to push these numbers straight into your Notion CRM!
+    // Save to CSV
+    let csvContent = "Name,Phone\n" + finalLeads.map(e => `"${e.name}","${e.phone}"`).join("\n");
+    fs.writeFileSync('leads.csv', csvContent, 'utf8');
+    
+    // Save to JSON
+    fs.writeFileSync('leads.json', JSON.stringify(finalLeads, null, 2), 'utf8');
+
+    console.log("Saved to leads.csv and leads.json!");
+    console.log("You can safely close the browser window now.");
+    await browser.close();
 }
 
 main().catch(console.error);
